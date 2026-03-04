@@ -13,14 +13,15 @@ import sys
 from collections import Counter, deque
 from typing import Optional
 
+import cv2
 import numpy as np
 
 try:
     from config import PLATE_CROP_EXPAND, PLATE_VOTE_WINDOW, PLATE_MIN_CONFIDENCE
 except ImportError:
     PLATE_CROP_EXPAND = 0.15
-    PLATE_VOTE_WINDOW = 15
-    PLATE_MIN_CONFIDENCE = 0.45
+    PLATE_VOTE_WINDOW = 30
+    PLATE_MIN_CONFIDENCE = 0.30
 
 try:
     import easyocr
@@ -28,11 +29,38 @@ try:
 except ImportError:
     _EASYOCR_AVAILABLE = False
 
+# 한국 번호판에서 사용되는 한글 문자만 허용 (가나다라... 지역명 제외)
+_KO_PLATE_HANGUL = "가나다라마거너더러머버서어저고노도로모보소오조구누두루무부수우주하허호"
+# EasyOCR allowlist: 번호판 허용 문자 (한글+숫자+영문 대문자)
+_PLATE_ALLOWLIST = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ" + _KO_PLATE_HANGUL
+
 
 def _clean_plate(text: str) -> str:
-    """Strip whitespace and keep only Korean, uppercase alpha, digits, hyphens."""
+    """공백 제거 후 한글·영문 대문자·숫자·하이픈만 유지. 3자 미만이면 빈 문자열 반환."""
     cleaned = re.sub(r"[^\uAC00-\uD7A3A-Z0-9\-]", "", text.upper().strip())
-    return cleaned if len(cleaned) >= 3 else ""
+    return cleaned if len(cleaned) >= 4 else ""
+
+
+def _preprocess_crop(crop: np.ndarray) -> np.ndarray:
+    """번호판 OCR 정확도 향상을 위한 전처리.
+
+    - 최소 높이 80px 보장 (EasyOCR는 큰 이미지에서 더 정확)
+    - CLAHE로 대비 향상 (역광·야간 번호판에 효과적)
+    """
+    h, w = crop.shape[:2]
+    # 높이 기준 최소 80px로 업스케일
+    scale = max(1.0, 80.0 / h)
+    if scale > 1.0:
+        crop = cv2.resize(
+            crop,
+            (int(w * scale), int(h * scale)),
+            interpolation=cv2.INTER_CUBIC,
+        )
+    # CLAHE 대비 향상 (그레이스케일 채널)
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
+    enhanced = clahe.apply(gray)
+    return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
 
 
 class PlateDetector:
@@ -104,8 +132,14 @@ class PlateDetector:
         crop = self._crop_bbox(frame, bbox_xyxy)
         if crop is None:
             return
+        crop = _preprocess_crop(crop)
         try:
-            results = self._reader.readtext(crop, detail=1)
+            results = self._reader.readtext(
+                crop,
+                detail=1,
+                paragraph=False,
+                allowlist=_PLATE_ALLOWLIST,
+            )
         except Exception:
             return
         for (_bbox, text, conf) in results:
