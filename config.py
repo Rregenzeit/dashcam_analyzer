@@ -84,5 +84,5 @@ PLATE_LANGUAGES = ["ko", "en"]    # OCR languages: Korean + English
 # ── Web API ──────────────────────────────────────────────────────────────────
 API_HOST = "0.0.0.0"
 API_PORT = 8000
-CLIP_BUFFER_SECS_WEB = 3.0        # pre/post buffer for cut-in clips (web jobs)
+CLIP_BUFFER_SECS_WEB = 5.0        # pre/post buffer for cut-in clips (web jobs)
 OUTPUTS_DIR = "outputs"           # root directory for all job outputs
