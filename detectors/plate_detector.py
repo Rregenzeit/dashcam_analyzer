@@ -18,8 +18,8 @@ try:
     from config import PLATE_CROP_EXPAND, PLATE_VOTE_WINDOW, PLATE_MIN_CONFIDENCE
 except ImportError:
     PLATE_CROP_EXPAND = 0.15
-    PLATE_VOTE_WINDOW = 10
-    PLATE_MIN_CONFIDENCE = 0.3
+    PLATE_VOTE_WINDOW = 15
+    PLATE_MIN_CONFIDENCE = 0.45
 
 try:
     import easyocr
@@ -29,8 +29,8 @@ except ImportError:
 
 
 def _clean_plate(text: str) -> str:
-    """Strip whitespace and keep only alphanumeric + common plate chars."""
-    cleaned = re.sub(r"[^A-Z0-9\-]", "", text.upper().strip())
+    """Strip whitespace and keep only Korean, uppercase alpha, digits, hyphens."""
+    cleaned = re.sub(r"[^\uAC00-\uD7A3A-Z0-9\-]", "", text.upper().strip())
     return cleaned if len(cleaned) >= 3 else ""
 
 
@@ -48,7 +48,12 @@ class PlateDetector:
 
     def __init__(self, languages: list[str] | None = None) -> None:
         self._reader = None
-        self._languages = languages or ["en"]
+        try:
+            from config import PLATE_LANGUAGES
+            default_langs = PLATE_LANGUAGES
+        except (ImportError, AttributeError):
+            default_langs = ["ko", "en"]
+        self._languages = languages or default_langs
         self._history: dict[int, deque] = {}
 
     def _ensure_reader(self) -> bool:

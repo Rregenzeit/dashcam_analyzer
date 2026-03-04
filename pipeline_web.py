@@ -130,7 +130,7 @@ class WebPipeline:
 
                 # -- Cut-in detection -----------------------------------
                 new_events: list[_CutInEvent] = self.cutin_detector.update(
-                    frame_idx, frame_w, centroids, lane_bounds
+                    frame_idx, frame_w, centroids, lane_bounds, frame_h
                 )
 
                 for evt in new_events:

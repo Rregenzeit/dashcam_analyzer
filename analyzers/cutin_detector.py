@@ -22,12 +22,16 @@ try:
         CUTIN_ENTRY_BUFFER_FRAMES,
         CUTIN_COOLDOWN_FRAMES,
         EGO_LANE_WIDTH_RATIO,
+        CUTIN_MIN_LATERAL_SPEED,
+        CUTIN_FRONT_ZONE_RATIO,
     )
 except ImportError:
-    CUTIN_MIN_FRAMES_IN_EGO = 8
-    CUTIN_ENTRY_BUFFER_FRAMES = 6
-    CUTIN_COOLDOWN_FRAMES = 90
-    EGO_LANE_WIDTH_RATIO = 0.35
+    CUTIN_MIN_FRAMES_IN_EGO = 15
+    CUTIN_ENTRY_BUFFER_FRAMES = 10
+    CUTIN_COOLDOWN_FRAMES = 120
+    EGO_LANE_WIDTH_RATIO = 0.45
+    CUTIN_MIN_LATERAL_SPEED = 0.015
+    CUTIN_FRONT_ZONE_RATIO = 0.70
 
 
 @dataclass
@@ -56,6 +60,7 @@ class _VehicleTrack:
     frames_inside: int = 0
     cooldown_remaining: int = 0
     centroids: deque = field(default_factory=lambda: deque(maxlen=60))
+    x_history: deque = field(default_factory=lambda: deque(maxlen=5))
 
 
 def _estimate_ego_lane(frame_w: int, lane_boundaries: Optional[list[float]]) -> tuple[float, float]:
@@ -92,14 +97,23 @@ class CutInDetector:
         frame_w: int,
         vehicle_centroids: dict[int, tuple[float, float]],
         lane_boundaries: Optional[list[float]] = None,
+        frame_h: Optional[int] = None,
     ) -> list[CutInEvent]:
         """Process one frame. Returns list of newly confirmed CutInEvents."""
         ego_left, ego_right = _estimate_ego_lane(frame_w, lane_boundaries)
         events: list[CutInEvent] = []
 
+        # Front-zone threshold: ignore vehicles in the upper part of the frame
+        front_zone_threshold = (frame_h * (1.0 - CUTIN_FRONT_ZONE_RATIO)) if frame_h else None
+
         for track_id, (cx, cy) in vehicle_centroids.items():
+            # Filter A: front zone — skip vehicles too far away (high in the frame)
+            if front_zone_threshold is not None and cy < front_zone_threshold:
+                continue
+
             track = self._tracks.setdefault(track_id, _VehicleTrack())
             track.centroids.append((cx, cy))
+            track.x_history.append(cx)
 
             if track.state == _VehicleState.COOLDOWN:
                 track.cooldown_remaining -= 1
@@ -111,6 +125,12 @@ class CutInDetector:
 
             if track.state in (_VehicleState.UNKNOWN, _VehicleState.OUTSIDE_EGO):
                 if in_ego:
+                    # Filter B: lateral speed — require meaningful lateral movement
+                    if len(track.x_history) >= 2:
+                        lateral_displacement = abs(track.x_history[-1] - track.x_history[0])
+                        min_displacement = CUTIN_MIN_LATERAL_SPEED * frame_w
+                        if lateral_displacement < min_displacement:
+                            continue
                     track.state = _VehicleState.ENTERING
                     track.enter_frame = frame_idx
                     track.frames_inside = 1

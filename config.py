@@ -7,7 +7,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Model
 YOLO_MODEL = "yolov8n.pt"       # Options: yolov8n/s/m/l/x.pt
-CONF_THRESHOLD = 0.4            # Detection confidence threshold
+CONF_THRESHOLD = 0.50           # Detection confidence threshold
 VEHICLE_CLASSES = [2, 3, 5, 7]  # COCO: car=2, motorcycle=3, bus=5, truck=7
 
 # Tracking
@@ -68,15 +68,18 @@ NORMAL_BOX_COLOR = (255, 165, 0)  # BGR orange
 TEXT_COLOR = (255, 255, 255)
 
 # ── Cut-in Detection ─────────────────────────────────────────────────────────
-CUTIN_MIN_FRAMES_IN_EGO = 8       # frames vehicle must stay in ego lane to confirm cut-in
-CUTIN_ENTRY_BUFFER_FRAMES = 6     # frames crossing boundary before we start counting
-CUTIN_COOLDOWN_FRAMES = 90        # per-vehicle cooldown after a cut-in event
-EGO_LANE_WIDTH_RATIO = 0.35       # fraction of frame width considered ego lane
+CUTIN_MIN_FRAMES_IN_EGO = 15      # frames vehicle must stay in ego lane to confirm cut-in
+CUTIN_ENTRY_BUFFER_FRAMES = 10    # frames crossing boundary before we start counting
+CUTIN_COOLDOWN_FRAMES = 120       # per-vehicle cooldown after a cut-in event
+EGO_LANE_WIDTH_RATIO = 0.45       # fraction of frame width considered ego lane
+CUTIN_MIN_LATERAL_SPEED = 0.015   # minimum lateral displacement per frame (ratio of frame_w)
+CUTIN_FRONT_ZONE_RATIO = 0.70     # only track vehicles in the lower fraction of the frame
 
 # ── Plate Recognition ────────────────────────────────────────────────────────
 PLATE_CROP_EXPAND = 0.15          # fraction to expand vehicle bbox for plate search
-PLATE_VOTE_WINDOW = 10            # frames for majority-vote text stabilization
-PLATE_MIN_CONFIDENCE = 0.3        # EasyOCR minimum confidence threshold
+PLATE_VOTE_WINDOW = 15            # frames for majority-vote text stabilization
+PLATE_MIN_CONFIDENCE = 0.45       # EasyOCR minimum confidence threshold
+PLATE_LANGUAGES = ["ko", "en"]    # OCR languages: Korean + English
 
 # ── Web API ──────────────────────────────────────────────────────────────────
 API_HOST = "0.0.0.0"
