@@ -1,0 +1,30 @@
+[
+  {
+    "timestamp_sec": "34.233",
+    "frame_number": 1027,
+    "tracker_id": 103,
+    "violation_type": "NO_BLINKER_LANE_CHANGE",
+    "recorded_at": "2026-03-04T00:52:27"
+  },
+  {
+    "timestamp_sec": "42.600",
+    "frame_number": 1278,
+    "tracker_id": 215,
+    "violation_type": "NO_BLINKER_LANE_CHANGE",
+    "recorded_at": "2026-03-04T00:52:44"
+  },
+  {
+    "timestamp_sec": "43.533",
+    "frame_number": 1306,
+    "tracker_id": 229,
+    "violation_type": "NO_BLINKER_LANE_CHANGE",
+    "recorded_at": "2026-03-04T00:52:48"
+  },
+  {
+    "timestamp_sec": "44.233",
+    "frame_number": 1327,
+    "tracker_id": 235,
+    "violation_type": "NO_BLINKER_LANE_CHANGE",
+    "recorded_at": "2026-03-04T00:52:52"
+  }
+]
