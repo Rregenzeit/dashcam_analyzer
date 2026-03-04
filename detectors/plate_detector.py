@@ -9,6 +9,7 @@ per track_id and return the most-common non-empty string.
 """
 from __future__ import annotations
 import re
+import sys
 from collections import Counter, deque
 from typing import Optional
 
@@ -58,11 +59,13 @@ class PlateDetector:
 
     def _ensure_reader(self) -> bool:
         if not _EASYOCR_AVAILABLE:
+            print("[PlateDetector] easyocr 미설치 — 번호판 인식 비활성화", file=sys.stderr)
             return False
         if self._reader is None:
             try:
                 self._reader = easyocr.Reader(self._languages, gpu=self._gpu_available())
-            except Exception:
+            except Exception as e:
+                print(f"[PlateDetector] Reader 초기화 실패: {e}", file=sys.stderr)
                 return False
         return True
 
@@ -121,7 +124,7 @@ class PlateDetector:
             return None
         counter = Counter(hist)
         most_common, count = counter.most_common(1)[0]
-        return most_common if count >= 2 else None
+        return most_common if count >= 1 else None
 
     def reset_track(self, track_id: int) -> None:
         self._history.pop(track_id, None)

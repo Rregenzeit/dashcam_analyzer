@@ -57,4 +57,8 @@ async def download_clip(job_id: str, filename: str):
     clip_path = Path("outputs") / job_id / "clips" / filename
     if not clip_path.exists():
         raise HTTPException(status_code=404, detail="Clip not found")
-    return FileResponse(str(clip_path), media_type="video/mp4", filename=filename)
+    return FileResponse(
+        str(clip_path),
+        media_type="video/mp4",
+        headers={"Content-Disposition": f"inline; filename=\"{filename}\""},
+    )

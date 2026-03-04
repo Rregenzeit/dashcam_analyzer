@@ -13,7 +13,7 @@ Does NOT modify or call the existing Pipeline class — runs independently
 so the CLI workflow is untouched.
 """
 from __future__ import annotations
-import json, time
+import json, os, subprocess, sys, time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -43,6 +43,37 @@ ProgressCallback = Callable[[float, str], None]
 # H.264(avc1) 우선 — 브라우저 호환. 지원 안 되면 mp4v로 대체
 _FOURCC_H264 = cv2.VideoWriter_fourcc(*"avc1")
 _FOURCC_FALLBACK = cv2.VideoWriter_fourcc(*"mp4v")
+
+
+def _reencode_h264(path: str) -> bool:
+    """ffmpeg으로 H.264 MP4 재인코딩. 성공 시 True 반환."""
+    tmp = path + ".reenc.mp4"
+    try:
+        r = subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", path,
+                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                "-movflags", "+faststart",
+                tmp,
+            ],
+            capture_output=True,
+            timeout=120,
+        )
+        if r.returncode == 0 and Path(tmp).exists():
+            os.replace(tmp, path)
+            return True
+        if r.returncode != 0:
+            print(f"[ffmpeg] 재인코딩 실패: {r.stderr.decode(errors='replace')[-300:]}",
+                  file=sys.stderr)
+    except FileNotFoundError:
+        print("[ffmpeg] ffmpeg를 찾을 수 없음 — mp4v 클립은 브라우저에서 재생되지 않을 수 있음",
+              file=sys.stderr)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        print(f"[ffmpeg] 재인코딩 오류: {e}", file=sys.stderr)
+    finally:
+        if Path(tmp).exists():
+            Path(tmp).unlink(missing_ok=True)
+    return False
 
 
 class WebPipeline:
@@ -104,6 +135,8 @@ class WebPipeline:
 
         # Active clip writers: event_id -> {writer, frames_remaining}
         active_writers: dict[str, dict] = {}
+        # mp4v fallback 사용 클립 경로 → 루프 후 ffmpeg 재인코딩 대상
+        _reenc_paths: list[str] = []
 
         try:
             while True:
@@ -152,12 +185,16 @@ class WebPipeline:
                     writer = cv2.VideoWriter(
                         clip_path, _FOURCC_H264, fps, (frame_w, frame_h)
                     )
+                    _used_fallback = False
                     if not writer.isOpened():
-                        # H.264 미지원 환경 → mp4v fallback
+                        # H.264 미지원 환경 → mp4v fallback + 나중에 ffmpeg 재인코딩
                         writer = cv2.VideoWriter(
                             clip_path, _FOURCC_FALLBACK, fps, (frame_w, frame_h)
                         )
+                        _used_fallback = True
                     clip_filename = clip_name if writer.isOpened() else None
+                    if clip_filename and _used_fallback:
+                        _reenc_paths.append(clip_path)
 
                     self._events.append({
                         "event_id": evt.event_id,
@@ -200,6 +237,12 @@ class WebPipeline:
             cap.release()
             for state in active_writers.values():
                 state["writer"].release()
+
+        # -- ffmpeg 재인코딩 (mp4v fallback 클립 → H.264) -----------------
+        if _reenc_paths:
+            self._progress(0.98, "클립 H.264 재인코딩 중…")
+            for cp in _reenc_paths:
+                _reencode_h264(cp)
 
         # -- Write result.json ------------------------------------------
         finished = time.time()
