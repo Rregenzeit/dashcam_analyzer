@@ -147,18 +147,7 @@ class WebPipeline:
                     plate = self.plate_detector.get_best(evt.track_id)
                     clip_name = f"{evt.event_id}_track{evt.track_id}.mp4"
 
-                    self._events.append({
-                        "event_id": evt.event_id,
-                        "frame_start": evt.frame_start,
-                        "frame_end": evt.frame_end,
-                        "track_id": evt.track_id,
-                        "plate_text": plate,
-                        "turn_signal": turn_signal,
-                        "clip_filename": clip_name,
-                    })
-
-                    # Start clip writer (pre-buffer + post-buffer)
-                    # avc1(H.264) 시도 → 브라우저 직접 재생 가능
+                    # writer 먼저 생성 → clip_filename 결정
                     clip_path = str(self.clips_dir / clip_name)
                     writer = cv2.VideoWriter(
                         clip_path, _FOURCC_H264, fps, (frame_w, frame_h)
@@ -168,13 +157,26 @@ class WebPipeline:
                         writer = cv2.VideoWriter(
                             clip_path, _FOURCC_FALLBACK, fps, (frame_w, frame_h)
                         )
-                    # Write pre-buffered frames from ring
-                    for pre_frame in ring[-buffer_frames:]:
-                        writer.write(pre_frame)
-                    active_writers[evt.event_id] = {
-                        "writer": writer,
-                        "frames_remaining": buffer_frames,
-                    }
+                    clip_filename = clip_name if writer.isOpened() else None
+
+                    self._events.append({
+                        "event_id": evt.event_id,
+                        "frame_start": evt.frame_start,
+                        "frame_end": evt.frame_end,
+                        "track_id": evt.track_id,
+                        "plate_text": plate,
+                        "turn_signal": turn_signal,
+                        "clip_filename": clip_filename,
+                    })
+
+                    if writer.isOpened():
+                        # 사전 버퍼 프레임 기록
+                        for pre_frame in ring[-buffer_frames:]:
+                            writer.write(pre_frame)
+                        active_writers[evt.event_id] = {
+                            "writer": writer,
+                            "frames_remaining": buffer_frames,
+                        }
 
                 # -- Write to active clip writers -----------------------
                 for eid, state in list(active_writers.items()):
