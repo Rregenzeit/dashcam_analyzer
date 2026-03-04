@@ -40,7 +40,9 @@ except ImportError:
 
 ProgressCallback = Callable[[float, str], None]
 
-_FOURCC = cv2.VideoWriter_fourcc(*"mp4v")
+# H.264(avc1) 우선 — 브라우저 호환. 지원 안 되면 mp4v로 대체
+_FOURCC_H264 = cv2.VideoWriter_fourcc(*"avc1")
+_FOURCC_FALLBACK = cv2.VideoWriter_fourcc(*"mp4v")
 
 
 class WebPipeline:
@@ -156,10 +158,16 @@ class WebPipeline:
                     })
 
                     # Start clip writer (pre-buffer + post-buffer)
+                    # avc1(H.264) 시도 → 브라우저 직접 재생 가능
                     clip_path = str(self.clips_dir / clip_name)
                     writer = cv2.VideoWriter(
-                        clip_path, _FOURCC, fps, (frame_w, frame_h)
+                        clip_path, _FOURCC_H264, fps, (frame_w, frame_h)
                     )
+                    if not writer.isOpened():
+                        # H.264 미지원 환경 → mp4v fallback
+                        writer = cv2.VideoWriter(
+                            clip_path, _FOURCC_FALLBACK, fps, (frame_w, frame_h)
+                        )
                     # Write pre-buffered frames from ring
                     for pre_frame in ring[-buffer_frames:]:
                         writer.write(pre_frame)

@@ -158,6 +158,20 @@
       transition: background 0.15s;
     }
     .play-btn:hover { background: #2a3f2a; }
+    .dl-btn {
+      background: #1a1f2e;
+      border: 1px solid #4b5563;
+      color: #60a5fa;
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 0.78rem;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-block;
+      margin-left: 6px;
+      transition: background 0.15s;
+    }
+    .dl-btn:hover { background: #1e2a3f; }
     .inline-video {
       display: block;
       margin-top: 8px;
@@ -408,6 +422,14 @@
         btn.textContent = '■ 닫기';
       });
       el.appendChild(btn);
+      // 다운로드 버튼
+      const dlLink = document.createElement('a');
+      dlLink.href = clipUrl;
+      dlLink.download = ev.clip_filename;
+      dlLink.className = 'dl-btn';
+      dlLink.textContent = '⬇';
+      dlLink.title = '클립 다운로드';
+      el.appendChild(dlLink);
       return el;
     }
   </script>
