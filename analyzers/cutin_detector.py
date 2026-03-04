@@ -61,6 +61,8 @@ class _VehicleTrack:
     cooldown_remaining: int = 0
     centroids: deque = field(default_factory=lambda: deque(maxlen=60))
     x_history: deque = field(default_factory=lambda: deque(maxlen=5))
+    # 인접 차선(ego lane 바깥)에서 진입한 경우에만 True → 이 플래그가 True여야 이벤트 발생
+    entered_from_adjacent: bool = False
 
 
 def _estimate_ego_lane(frame_w: int, lane_boundaries: Optional[list[float]]) -> tuple[float, float]:
@@ -119,13 +121,18 @@ class CutInDetector:
                 track.cooldown_remaining -= 1
                 if track.cooldown_remaining <= 0:
                     track.state = _VehicleState.OUTSIDE_EGO
+                    track.entered_from_adjacent = False
                 continue
 
             in_ego = _centroid_in_ego(cx, ego_left, ego_right)
 
-            if track.state in (_VehicleState.UNKNOWN, _VehicleState.OUTSIDE_EGO):
+            if track.state == _VehicleState.UNKNOWN:
+                # 첫 등장 프레임: ego lane 위치만 기록, 이벤트 발생 경로 진입 없음
+                track.state = _VehicleState.OUTSIDE_EGO if not in_ego else _VehicleState.INSIDE_EGO
+
+            elif track.state == _VehicleState.OUTSIDE_EGO:
                 if in_ego:
-                    # Filter B: lateral speed — require meaningful lateral movement
+                    # Filter B: 횡방향 이동 속도 — 충분한 횡방향 이동이 있어야 ENTERING 전환
                     if len(track.x_history) >= 2:
                         lateral_displacement = abs(track.x_history[-1] - track.x_history[0])
                         min_displacement = CUTIN_MIN_LATERAL_SPEED * frame_w
@@ -134,6 +141,7 @@ class CutInDetector:
                     track.state = _VehicleState.ENTERING
                     track.enter_frame = frame_idx
                     track.frames_inside = 1
+                    track.entered_from_adjacent = True  # 인접 차선에서 진입 확인
 
             elif track.state == _VehicleState.ENTERING:
                 if in_ego:
@@ -146,6 +154,9 @@ class CutInDetector:
 
             elif track.state == _VehicleState.INSIDE_EGO:
                 if in_ego:
+                    # entered_from_adjacent가 False인 경우 = 처음부터 앞에 있던 차량 → 이벤트 없음
+                    if not track.entered_from_adjacent:
+                        continue
                     track.frames_inside += 1
                     if track.frames_inside >= CUTIN_MIN_FRAMES_IN_EGO:
                         self._event_counter += 1

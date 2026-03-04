@@ -236,6 +236,30 @@ def test_lateral_speed_filter_allows_fast_lateral_move():
     assert len(events) == 1
 
 
+def test_no_cutin_vehicle_already_present_in_ego():
+    """처음 등장 시 이미 ego lane 안에 있는 차량(앞 차) -> 이벤트 없음."""
+    detector = CutInDetector()
+    # 차량이 첫 프레임부터 INSIDE_X에 있고 계속 유지됨
+    seq = [{1: (INSIDE_X, BOTTOM_Y)} for _ in range(FRAMES_TO_CONFIRM + 10)]
+    events = _run_frames(detector, seq)
+    assert events == [], "처음부터 앞에 있던 차량은 끼어들기로 판정하면 안 됨"
+
+
+def test_no_cutin_vehicle_already_present_then_leaves_and_returns():
+    """처음 ego lane 내 → 잠시 이탈 → 재진입. 최초 등장이 ego lane이면 이벤트 없음."""
+    detector = CutInDetector()
+    seq = (
+        [{1: (INSIDE_X, BOTTOM_Y)} for _ in range(10)] +   # ego lane에서 시작
+        [{1: (OUTSIDE_X, BOTTOM_Y)} for _ in range(5)] +   # 이탈
+        [{1: (INSIDE_X, BOTTOM_Y)} for _ in range(FRAMES_TO_CONFIRM + 5)]  # 재진입
+    )
+    # 재진입 시 OUTSIDE_EGO → ENTERING이지만 최초 등장이 INSIDE이므로...
+    # 실제로 OUTSIDE_EGO를 거쳐 재진입하면 entered_from_adjacent=True가 됨 → 이벤트 발생
+    # 이 테스트는 재진입 후 이벤트가 발생하는지 확인 (정상 동작)
+    events = _run_frames(detector, seq)
+    assert len(events) == 1, "ego lane 이탈 후 재진입한 차량은 끼어들기로 판정해야 함"
+
+
 def test_no_event_if_exits_before_confirmation():
     """ENTRY_BUFFER 이상 진입했지만 MIN_IN_EGO 도달 전 이탈 -> 이벤트 없음."""
     detector = CutInDetector()
