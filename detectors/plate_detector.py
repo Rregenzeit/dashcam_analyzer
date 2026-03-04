@@ -29,11 +29,6 @@ try:
 except ImportError:
     _EASYOCR_AVAILABLE = False
 
-# 한국 번호판에서 사용되는 한글 문자만 허용 (가나다라... 지역명 제외)
-_KO_PLATE_HANGUL = "가나다라마거너더러머버서어저고노도로모보소오조구누두루무부수우주하허호"
-# EasyOCR allowlist: 번호판 허용 문자 (한글+숫자+영문 대문자)
-_PLATE_ALLOWLIST = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ" + _KO_PLATE_HANGUL
-
 
 def _clean_plate(text: str) -> str:
     """공백 제거 후 한글·영문 대문자·숫자·하이픈만 유지. 3자 미만이면 빈 문자열 반환."""
@@ -134,12 +129,7 @@ class PlateDetector:
             return
         crop = _preprocess_crop(crop)
         try:
-            results = self._reader.readtext(
-                crop,
-                detail=1,
-                paragraph=False,
-                allowlist=_PLATE_ALLOWLIST,
-            )
+            results = self._reader.readtext(crop, detail=1, paragraph=False)
         except Exception:
             return
         for (_bbox, text, conf) in results:
