@@ -123,7 +123,7 @@ class WebPipeline:
         candidates: list[str] = []
 
         # 1) 연속 8자리: 20251209
-        candidates.extend(m.group(1) for m in re.finditer(r"(\d{8})", compact))
+        candidates.extend(m.group(1) for m in re.finditer(r"(20\d{6})", compact))
 
         # 2) 구분자 포함: 2025-12-09 / 2025.12.09 / 2025/12/09
         for m in re.finditer(r"(\d{4})[^\d]?(\d{2})[^\d]?(\d{2})", compact):
@@ -247,7 +247,7 @@ class WebPipeline:
         else:
             # 파일명에서 YYYYMMDD 추출 (예: 20260106-20h03m04s_myN.avi)
             fname = Path(video_path).stem
-            m = re.search(r'(\d{8})', fname)
+            m = re.search(r'(20\d{6})', fname)
             if m:
                 recording_date = m.group(1)
                 print(f"[WebPipeline] 촬영일(파일명 폴백): {recording_date}", file=sys.stderr)

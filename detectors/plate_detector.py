@@ -75,6 +75,37 @@ def _normalize_plate(text: str) -> str:
     return corrected if len(corrected) >= 7 else ""
 
 
+_PLATE_ASPECT_MIN = 2.0
+_PLATE_ASPECT_MAX = 7.0
+
+
+def _detect_plate_contour(
+    roi: np.ndarray,
+    roi_offset: tuple[int, int] = (0, 0),
+) -> list[tuple[int, int, int, int]]:
+    """Canny + 윤곽선 분석으로 번호판 후보 영역(xyxy) 목록 반환.
+
+    가로세로비 2.0-7.0 (한국 번호판 범위)의 사각형 후보만 선택.
+    """
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blurred, 50, 150)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (17, 3))
+    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    h_roi, w_roi = roi.shape[:2]
+    min_area = h_roi * w_roi * 0.002
+    ox, oy = roi_offset
+    candidates: list[tuple[int, int, int, int]] = []
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        if w * h < min_area or h == 0:
+            continue
+        if _PLATE_ASPECT_MIN <= w / h <= _PLATE_ASPECT_MAX:
+            candidates.append((x + ox, y + oy, x + ox + w, y + oy + h))
+    return candidates
+
+
 def _preprocess_crop(crop: np.ndarray) -> np.ndarray:
     """번호판 OCR 정확도 향상을 위한 전처리.
 
@@ -152,23 +183,33 @@ class PlateDetector:
         bw, bh = x2 - x1, y2 - y1
         crops: list[np.ndarray] = []
 
-        # 1. 하단 40% 전체 너비 (번호판 주요 위치)
         py1 = max(0, y1 + int(bh * 0.55))
         py2 = min(h, y2 + int(bh * 0.05))
         px1 = max(0, x1 - int(bw * 0.05))
         px2 = min(w, x2 + int(bw * 0.05))
+
+        # 1. 컨투어 기반 번호판 후보 (1순위)
+        if py2 > py1 and px2 > px1:
+            bottom_roi = frame[py1:py2, px1:px2]
+            if bottom_roi.size > 0:
+                for (cx1, cy1, cx2, cy2) in _detect_plate_contour(bottom_roi, roi_offset=(px1, py1)):
+                    crop = frame[max(0, cy1):min(h, cy2), max(0, cx1):min(w, cx2)]
+                    if crop.size > 0:
+                        crops.append(crop)
+
+        # 2. 하단 전체 너비
         c = frame[py1:py2, px1:px2]
         if c.size > 0:
             crops.append(c)
 
-        # 2. 하단 40% 중앙 집중 (번호판 폭은 차체의 ~50%)
+        # 3. 하단 중앙 집중 (번호판 폭은 차체의 ~50%)
         cx = (x1 + x2) // 2
         hw = max(int(bw * 0.40), 60)
         c2 = frame[py1:py2, max(0, cx - hw):min(w, cx + hw)]
         if c2.size > 0:
             crops.append(c2)
 
-        # 3. 전체 bbox 폴백
+        # 4. 전체 bbox 폴백
         exp = int(min(bw, bh) * 0.05)
         c3 = frame[max(0, y1 - exp):min(h, y2 + exp),
                    max(0, x1 - exp):min(w, x2 + exp)]
