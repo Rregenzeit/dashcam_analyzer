@@ -119,42 +119,65 @@ class WebPipeline:
     def _extract_recording_date(
         self, cap: cv2.VideoCapture, frame_h: int, frame_w: int
     ) -> Optional[str]:
-        """첫 프레임 상단 중앙 오버레이에서 날짜(YYYYMMDD)를 추출. 실패 시 None 반환."""
+        """여러 ROI/프레임에서 날짜(YYYYMMDD) 추출 후 다수결 투표.
+
+        대시캠 오버레이 형식 예: '20251209-16h46m31s'
+        → 8자리 연속 숫자를 먼저 탐색.
+        """
         if not self.plate_detector._ensure_reader():
             return None
         reader = self.plate_detector._reader
 
-        h_crop = max(1, int(frame_h * 0.12))
-        w_start = int(frame_w * 0.20)
-        w_end = int(frame_w * 0.80)
+        # 검색할 ROI: (y_start_ratio, y_end_ratio, x_start_ratio, x_end_ratio)
+        rois = [
+            (0.00, 0.12, 0.20, 0.80),  # 상단 중앙 (기본)
+            (0.00, 0.12, 0.00, 0.50),  # 상단 좌
+            (0.00, 0.12, 0.50, 1.00),  # 상단 우
+            (0.00, 0.15, 0.00, 1.00),  # 상단 전체
+            (0.85, 1.00, 0.00, 1.00),  # 하단 전체 (일부 대시캠)
+        ]
 
         saved_pos = cap.get(cv2.CAP_PROP_POS_FRAMES)
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-        recording_date = None
+        votes: dict[str, int] = {}
 
-        for _ in range(5):
+        for _ in range(10):
             ret, frame = cap.read()
             if not ret:
                 break
-            crop = frame[:h_crop, w_start:w_end]
-            crop = cv2.resize(
-                crop, (crop.shape[1] * 2, crop.shape[0] * 2),
-                interpolation=cv2.INTER_CUBIC,
-            )
-            try:
-                results = reader.readtext(crop, detail=0, paragraph=True)
-                text = " ".join(results)
-                # YYYY-MM-DD 또는 YYYY/MM/DD 형식에서 날짜만 추출
-                m = re.search(r'(\d{4})[-/](\d{2})[-/](\d{2})', text)
-                if m:
-                    recording_date = m.group(1) + m.group(2) + m.group(3)
-            except Exception as e:
-                print(f"[WebPipeline] 날짜 OCR 오류: {e}", file=sys.stderr)
-            if recording_date:
-                break
+            for (y0r, y1r, x0r, x1r) in rois:
+                y0 = int(frame_h * y0r)
+                y1 = max(y0 + 1, int(frame_h * y1r))
+                x0 = int(frame_w * x0r)
+                x1 = max(x0 + 1, int(frame_w * x1r))
+                crop = frame[y0:y1, x0:x1]
+                if crop.size == 0:
+                    continue
+                crop = cv2.resize(
+                    crop, (crop.shape[1] * 2, crop.shape[0] * 2),
+                    interpolation=cv2.INTER_CUBIC,
+                )
+                try:
+                    results = reader.readtext(crop, detail=0, paragraph=True)
+                    # 공백 제거 후 8자리 연속 숫자 탐색
+                    text = "".join(results).replace(" ", "")
+                    for m in re.finditer(r'(\d{8})', text):
+                        candidate = m.group(1)
+                        year = int(candidate[:4])
+                        month = int(candidate[4:6])
+                        day = int(candidate[6:8])
+                        if 2000 <= year <= 2100 and 1 <= month <= 12 and 1 <= day <= 31:
+                            votes[candidate] = votes.get(candidate, 0) + 1
+                except Exception as e:
+                    print(f"[WebPipeline] 날짜 OCR 오류: {e}", file=sys.stderr)
 
         cap.set(cv2.CAP_PROP_POS_FRAMES, saved_pos)
-        return recording_date
+
+        if votes:
+            best = max(votes, key=lambda k: votes[k])
+            print(f"[WebPipeline] 날짜 투표 결과: {votes}", file=sys.stderr)
+            return best
+        return None
 
     def _progress(self, frac: float, msg: str = "") -> None:
         self._progress_cb(frac, msg)

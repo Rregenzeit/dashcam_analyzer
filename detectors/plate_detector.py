@@ -100,20 +100,43 @@ class PlateDetector:
         except ImportError:
             return False
 
-    def _crop_bbox(
+    def _plate_roi_crops(
         self, frame: np.ndarray, bbox: tuple[int, int, int, int]
-    ) -> Optional[np.ndarray]:
+    ) -> list[np.ndarray]:
+        """번호판 위치 휴리스틱으로 후보 크롭 목록 반환.
+
+        한국 번호판은 차량 전·후면 하단 중앙에 위치.
+        대시캠에서 보이는 컷인 차량(측·전면)을 고려해 세 영역 탐색.
+        """
         h, w = frame.shape[:2]
         x1, y1, x2, y2 = bbox
         bw, bh = x2 - x1, y2 - y1
-        expand_x = int(bw * PLATE_CROP_EXPAND)
-        expand_y = int(bh * PLATE_CROP_EXPAND)
-        nx1 = max(0, x1 - expand_x)
-        ny1 = max(0, y1 - expand_y)
-        nx2 = min(w, x2 + expand_x)
-        ny2 = min(h, y2 + expand_y)
-        crop = frame[ny1:ny2, nx1:nx2]
-        return crop if crop.size > 0 else None
+        crops: list[np.ndarray] = []
+
+        # 1. 하단 40% 전체 너비 (번호판 주요 위치)
+        py1 = max(0, y1 + int(bh * 0.55))
+        py2 = min(h, y2 + int(bh * 0.05))
+        px1 = max(0, x1 - int(bw * 0.05))
+        px2 = min(w, x2 + int(bw * 0.05))
+        c = frame[py1:py2, px1:px2]
+        if c.size > 0:
+            crops.append(c)
+
+        # 2. 하단 40% 중앙 집중 (번호판 폭은 차체의 ~50%)
+        cx = (x1 + x2) // 2
+        hw = max(int(bw * 0.40), 60)
+        c2 = frame[py1:py2, max(0, cx - hw):min(w, cx + hw)]
+        if c2.size > 0:
+            crops.append(c2)
+
+        # 3. 전체 bbox 폴백
+        exp = int(min(bw, bh) * 0.05)
+        c3 = frame[max(0, y1 - exp):min(h, y2 + exp),
+                   max(0, x1 - exp):min(w, x2 + exp)]
+        if c3.size > 0:
+            crops.append(c3)
+
+        return crops
 
     def update(
         self,
@@ -124,31 +147,28 @@ class PlateDetector:
         """Add one frame's OCR candidate for a vehicle."""
         if not self._ensure_reader():
             return
-        crop = self._crop_bbox(frame, bbox_xyxy)
-        if crop is None:
-            return
-        crop = _preprocess_crop(crop)
-        try:
-            results = self._reader.readtext(crop, detail=1, paragraph=False)
-        except Exception:
-            return
-        for (_bbox, text, conf) in results:
-            if conf >= PLATE_MIN_CONFIDENCE:
-                cleaned = _clean_plate(text)
-                if cleaned:
-                    hist = self._history.setdefault(
-                        track_id, deque(maxlen=PLATE_VOTE_WINDOW)
-                    )
-                    hist.append(cleaned)
+        crops = self._plate_roi_crops(frame, bbox_xyxy)
+        hist = self._history.setdefault(track_id, deque(maxlen=PLATE_VOTE_WINDOW))
+        for crop in crops:
+            crop = _preprocess_crop(crop)
+            try:
+                results = self._reader.readtext(crop, detail=1, paragraph=False)
+            except Exception:
+                continue
+            for (_bbox, text, conf) in results:
+                if conf >= PLATE_MIN_CONFIDENCE:
+                    cleaned = _clean_plate(text)
+                    if cleaned:
+                        hist.append(cleaned)
 
     def get_best(self, track_id: int) -> Optional[str]:
-        """Return the most-common plate string seen so far, or None."""
+        """Return the most-common plate string seen so far (min 2 votes), or None."""
         hist = self._history.get(track_id)
         if not hist:
             return None
         counter = Counter(hist)
         most_common, count = counter.most_common(1)[0]
-        return most_common if count >= 1 else None
+        return most_common if count >= 2 else None
 
     def reset_track(self, track_id: int) -> None:
         self._history.pop(track_id, None)
