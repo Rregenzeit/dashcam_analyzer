@@ -1,8 +1,9 @@
 from __future__ import annotations
+import re
 import shutil
 from pathlib import Path
-from fastapi import APIRouter, UploadFile, File, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Request, UploadFile, File, HTTPException
+from fastapi.responses import FileResponse, StreamingResponse
 from .job_manager import job_manager
 from .worker import submit_job
 
@@ -53,12 +54,50 @@ async def list_clips(job_id: str):
 
 
 @router.get("/jobs/{job_id}/clips/{filename}")
-async def download_clip(job_id: str, filename: str):
+async def download_clip(job_id: str, filename: str, request: Request):
     clip_path = Path("outputs") / job_id / "clips" / filename
     if not clip_path.exists():
         raise HTTPException(status_code=404, detail="Clip not found")
+
+    file_size = clip_path.stat().st_size
+    range_header = request.headers.get("range")
+
+    if range_header:
+        m = re.match(r"bytes=(\d+)-(\d*)", range_header)
+        if m:
+            start = int(m.group(1))
+            end = int(m.group(2)) if m.group(2) else file_size - 1
+            end = min(end, file_size - 1)
+            chunk = end - start + 1
+
+            def _iter():
+                with clip_path.open("rb") as f:
+                    f.seek(start)
+                    remaining = chunk
+                    while remaining > 0:
+                        data = f.read(min(65536, remaining))
+                        if not data:
+                            break
+                        remaining -= len(data)
+                        yield data
+
+            return StreamingResponse(
+                _iter(),
+                status_code=206,
+                media_type="video/mp4",
+                headers={
+                    "Content-Range": f"bytes {start}-{end}/{file_size}",
+                    "Accept-Ranges": "bytes",
+                    "Content-Length": str(chunk),
+                    "Content-Disposition": f'inline; filename="{filename}"',
+                },
+            )
+
     return FileResponse(
         str(clip_path),
         media_type="video/mp4",
-        headers={"Content-Disposition": f"inline; filename=\"{filename}\""},
+        headers={
+            "Accept-Ranges": "bytes",
+            "Content-Disposition": f'inline; filename="{filename}"',
+        },
     )
