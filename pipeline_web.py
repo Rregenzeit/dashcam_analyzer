@@ -116,14 +116,43 @@ class WebPipeline:
 
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def _extract_date_candidates(text: str) -> list[str]:
+        """OCR 텍스트에서 날짜 후보(YYYYMMDD) 목록 추출."""
+        compact = re.sub(r"\s+", "", text)
+        candidates: list[str] = []
+
+        # 1) 연속 8자리: 20251209
+        candidates.extend(m.group(1) for m in re.finditer(r"(\d{8})", compact))
+
+        # 2) 구분자 포함: 2025-12-09 / 2025.12.09 / 2025/12/09
+        for m in re.finditer(r"(\d{4})[^\d]?(\d{2})[^\d]?(\d{2})", compact):
+            candidates.append("".join(m.groups()))
+
+        # 3) 대시캠 스타일: 20251209-16h46m31s
+        for m in re.finditer(r"(\d{4})(\d{2})(\d{2})[-_ ]?\d{1,2}h\d{1,2}m\d{1,2}s", compact, flags=re.IGNORECASE):
+            candidates.append("".join(m.groups()))
+
+        # 4) OCR 분리 오류(예: 2025 12 09 / 2025년12월09일)
+        for m in re.finditer(r"(\d{4})\D{0,3}(\d{1,2})\D{0,3}(\d{1,2})", compact):
+            y, mo, d = m.groups()
+            candidates.append(f"{y}{int(mo):02d}{int(d):02d}")
+
+        valid: list[str] = []
+        for c in candidates:
+            if len(c) != 8 or not c.isdigit():
+                continue
+            year = int(c[:4])
+            month = int(c[4:6])
+            day = int(c[6:8])
+            if 2000 <= year <= 2100 and 1 <= month <= 12 and 1 <= day <= 31:
+                valid.append(c)
+        return valid
+
     def _extract_recording_date(
         self, cap: cv2.VideoCapture, frame_h: int, frame_w: int
     ) -> Optional[str]:
-        """여러 ROI/프레임에서 날짜(YYYYMMDD) 추출 후 다수결 투표.
-
-        대시캠 오버레이 형식 예: '20251209-16h46m31s'
-        → 8자리 연속 숫자를 먼저 탐색.
-        """
+        """여러 ROI/프레임에서 날짜(YYYYMMDD) 추출 후 다수결 투표."""
         if not self.plate_detector._ensure_reader():
             return None
         reader = self.plate_detector._reader
@@ -137,44 +166,62 @@ class WebPipeline:
             (0.85, 1.00, 0.00, 1.00),  # 하단 전체 (일부 대시캠)
         ]
 
+        preprocess_modes = ["raw", "gray", "thresh", "thresh_inv"]
+
         saved_pos = cap.get(cv2.CAP_PROP_POS_FRAMES)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        sample_count = min(20, max(8, total_frames // 60 if total_frames > 0 else 10))
+        step = max(1, total_frames // sample_count) if total_frames > 0 else 1
         votes: dict[str, int] = {}
 
-        for _ in range(10):
-            ret, frame = cap.read()
-            if not ret:
-                break
-            for (y0r, y1r, x0r, x1r) in rois:
-                y0 = int(frame_h * y0r)
-                y1 = max(y0 + 1, int(frame_h * y1r))
-                x0 = int(frame_w * x0r)
-                x1 = max(x0 + 1, int(frame_w * x1r))
-                crop = frame[y0:y1, x0:x1]
-                if crop.size == 0:
-                    continue
-                crop = cv2.resize(
-                    crop, (crop.shape[1] * 2, crop.shape[0] * 2),
-                    interpolation=cv2.INTER_CUBIC,
-                )
-                try:
-                    results = reader.readtext(crop, detail=0, paragraph=True)
-                    # 공백 제거 후 8자리 연속 숫자 탐색
-                    text = "".join(results).replace(" ", "")
-                    for m in re.finditer(r'(\d{8})', text):
-                        candidate = m.group(1)
-                        year = int(candidate[:4])
-                        month = int(candidate[4:6])
-                        day = int(candidate[6:8])
-                        if 2000 <= year <= 2100 and 1 <= month <= 12 and 1 <= day <= 31:
-                            votes[candidate] = votes.get(candidate, 0) + 1
-                except Exception as e:
-                    print(f"[WebPipeline] 날짜 OCR 오류: {e}", file=sys.stderr)
+        try:
+            for i in range(sample_count):
+                if total_frames > 0:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, min(total_frames - 1, i * step))
+                ret, frame = cap.read()
+                if not ret:
+                    break
 
-        cap.set(cv2.CAP_PROP_POS_FRAMES, saved_pos)
+                for (y0r, y1r, x0r, x1r) in rois:
+                    y0 = int(frame_h * y0r)
+                    y1 = max(y0 + 1, int(frame_h * y1r))
+                    x0 = int(frame_w * x0r)
+                    x1 = max(x0 + 1, int(frame_w * x1r))
+                    crop = frame[y0:y1, x0:x1]
+                    if crop.size == 0:
+                        continue
+
+                    crop = cv2.resize(
+                        crop, (crop.shape[1] * 2, crop.shape[0] * 2),
+                        interpolation=cv2.INTER_CUBIC,
+                    )
+
+                    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                    thr = cv2.adaptiveThreshold(
+                        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                        cv2.THRESH_BINARY, 31, 7
+                    )
+                    thr_inv = cv2.bitwise_not(thr)
+                    variants = {
+                        "raw": crop,
+                        "gray": cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR),
+                        "thresh": cv2.cvtColor(thr, cv2.COLOR_GRAY2BGR),
+                        "thresh_inv": cv2.cvtColor(thr_inv, cv2.COLOR_GRAY2BGR),
+                    }
+
+                    for mode in preprocess_modes:
+                        try:
+                            results = reader.readtext(variants[mode], detail=0, paragraph=True)
+                            text = "".join(results)
+                            for candidate in self._extract_date_candidates(text):
+                                votes[candidate] = votes.get(candidate, 0) + 1
+                        except Exception as e:
+                            print(f"[WebPipeline] 날짜 OCR 오류({mode}): {e}", file=sys.stderr)
+        finally:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, saved_pos)
 
         if votes:
-            best = max(votes, key=lambda k: votes[k])
+            best = max(votes, key=votes.get)
             print(f"[WebPipeline] 날짜 투표 결과: {votes}", file=sys.stderr)
             return best
         return None
