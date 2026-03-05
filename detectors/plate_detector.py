@@ -36,6 +36,45 @@ def _clean_plate(text: str) -> str:
     return cleaned if len(cleaned) >= 4 else ""
 
 
+def _normalize_plate(text: str) -> str:
+    """한국 번호판 형태로 정규화(4가지 룰을 종합)."""
+    raw = _clean_plate(text).replace("-", "")
+    if not raw:
+        return ""
+
+    # 1) 원문 그대로 패턴 매칭
+    m = re.findall(r"(?:[가-힣]{2})?(\d{2,3}[가-힣]\d{4})", raw)
+    if m:
+        return m[-1]
+
+    # 2) OCR 오인식 보정(숫자 구간에서만): O/D/Q->0, I/L->1, Z->2, S->5, B->8
+    trans = str.maketrans({"O": "0", "D": "0", "Q": "0", "I": "1", "L": "1", "Z": "2", "S": "5", "B": "8"})
+    parts = re.split(r"([가-힣])", raw)
+    corrected_parts: list[str] = []
+    for part in parts:
+        if re.fullmatch(r"[가-힣]", part):
+            corrected_parts.append(part)
+        else:
+            corrected_parts.append(part.translate(trans))
+    corrected = "".join(corrected_parts)
+    m = re.findall(r"(?:[가-힣]{2})?(\d{2,3}[가-힣]\d{4})", corrected)
+    if m:
+        return m[-1]
+
+    # 3) 한글 1글자를 중심으로 앞 2~3자리, 뒤 4자리 복원 시도
+    for m in re.finditer(r"([가-힣])", corrected):
+        i = m.start()
+        left = re.sub(r"\D", "", corrected[:i])
+        right = re.sub(r"\D", "", corrected[i+1:])
+        if len(right) >= 4 and len(left) >= 2:
+            front = left[-3:] if len(left) >= 3 else left[-2:]
+            if len(front) in (2, 3):
+                return f"{front}{corrected[i]}{right[:4]}"
+
+    # 4) 완전 패턴은 아니어도 길이가 충분하면 투표용 후보 유지
+    return corrected if len(corrected) >= 7 else ""
+
+
 def _preprocess_crop(crop: np.ndarray) -> np.ndarray:
     """번호판 OCR 정확도 향상을 위한 전처리.
 
@@ -138,6 +177,23 @@ class PlateDetector:
 
         return crops
 
+    @staticmethod
+    def _ocr_variants(crop: np.ndarray) -> list[np.ndarray]:
+        """OCR 입력 4종(raw/clahe/threshold/invert-threshold) 생성."""
+        clahe_bgr = _preprocess_crop(crop)
+        gray = cv2.cvtColor(clahe_bgr, cv2.COLOR_BGR2GRAY)
+        thr = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY, 31, 7
+        )
+        thr_inv = cv2.bitwise_not(thr)
+        return [
+            crop,
+            clahe_bgr,
+            cv2.cvtColor(thr, cv2.COLOR_GRAY2BGR),
+            cv2.cvtColor(thr_inv, cv2.COLOR_GRAY2BGR),
+        ]
+
     def update(
         self,
         track_id: int,
@@ -150,14 +206,15 @@ class PlateDetector:
         crops = self._plate_roi_crops(frame, bbox_xyxy)
         hist = self._history.setdefault(track_id, deque(maxlen=PLATE_VOTE_WINDOW))
         for crop in crops:
-            crop = _preprocess_crop(crop)
-            try:
-                results = self._reader.readtext(crop, detail=1, paragraph=False)
-            except Exception:
-                continue
-            for (_bbox, text, conf) in results:
-                if conf >= PLATE_MIN_CONFIDENCE:
-                    cleaned = _clean_plate(text)
+            for variant in self._ocr_variants(crop):
+                try:
+                    results = self._reader.readtext(variant, detail=1, paragraph=False)
+                except Exception:
+                    continue
+                for (_bbox, text, conf) in results:
+                    if conf < PLATE_MIN_CONFIDENCE:
+                        continue
+                    cleaned = _normalize_plate(text)
                     if cleaned:
                         hist.append(cleaned)
 
@@ -168,7 +225,14 @@ class PlateDetector:
             return None
         counter = Counter(hist)
         most_common, count = counter.most_common(1)[0]
-        return most_common if count >= 2 else None
+        # 기본: 2회 이상 동일 문자열
+        if count >= 2:
+            return most_common
+
+        # 이벤트가 짧은 경우(히스토리 짧음) 단 1표라도 패턴이 명확하면 반환
+        if re.fullmatch(r"\d{2,3}[가-힣]\d{4}", most_common):
+            return most_common
+        return None
 
     def reset_track(self, track_id: int) -> None:
         self._history.pop(track_id, None)
