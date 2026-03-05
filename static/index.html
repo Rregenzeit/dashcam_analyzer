@@ -180,6 +180,7 @@
       background: #000;
     }
     .no-clip { color: #4b5563; font-size: 0.8rem; }
+    .video-filename { color: #c4b5fd; font-size: 0.78rem; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   </style>
 </head>
 <body>
@@ -193,7 +194,7 @@
         <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M12 4v12M8 8l4-4 4 4"/></svg>
         <span id="fileNameDisplay">파일을 선택하세요…</span>
       </label>
-      <input type="file" id="fileInput" accept="video/*" />
+      <input type="file" id="fileInput" accept="video/*" multiple />
       <button class="btn" id="uploadBtn" onclick="startUpload()" disabled>분석 시작</button>
     </div>
 
@@ -220,10 +221,9 @@
       <table>
         <thead>
           <tr>
+            <th>업로드 영상</th>
             <th>이벤트 ID</th>
-            <th>시작 프레임</th>
-            <th>종료 프레임</th>
-            <th>트랙 ID</th>
+            <th>날짜</th>
             <th>번호판</th>
             <th>방향지시등</th>
             <th>클립</th>
@@ -248,12 +248,15 @@
     const resultsBody = document.getElementById('resultsBody');
 
     let pollTimer = null;
-    let currentJobId = null;
+    // 각 파일별 { jobId, fileName, status, progress, message }
+    let activeJobs = [];
 
     fileInput.addEventListener('change', () => {
-      const file = fileInput.files[0];
-      if (file) {
-        fileNameDisplay.textContent = file.name;
+      const files = fileInput.files;
+      if (files.length > 0) {
+        fileNameDisplay.textContent = files.length === 1
+          ? files[0].name
+          : `${files.length}개 파일 선택됨`;
         uploadBtn.disabled = false;
       } else {
         fileNameDisplay.textContent = '파일을 선택하세요…';
@@ -278,62 +281,81 @@
     }
 
     async function startUpload() {
-      const file = fileInput.files[0];
-      if (!file) return;
+      const files = Array.from(fileInput.files);
+      if (files.length === 0) return;
 
       hideError();
       resultsSection.style.display = 'none';
       resultsBody.innerHTML = '';
       uploadBtn.disabled = true;
-
-      const formData = new FormData();
-      formData.append('file', file);
+      activeJobs = [];
 
       progressSection.style.display = 'block';
-      setProgress(0, '업로드 중…', '서버에 파일을 전송하고 있습니다.');
+      setProgress(0, `파일 업로드 중… (0 / ${files.length})`, '서버에 파일을 전송하고 있습니다.');
 
-      try {
-        const res = await fetch('/upload', { method: 'POST', body: formData });
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({}));
-          throw new Error(err.detail || `업로드 실패 (${res.status})`);
+      // 파일마다 순서대로 업로드하여 job_id 수집
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        try {
+          const formData = new FormData();
+          formData.append('file', file);
+          const res = await fetch('/upload', { method: 'POST', body: formData });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.detail || `업로드 실패 (${res.status})`);
+          }
+          const data = await res.json();
+          activeJobs.push({ jobId: data.job_id, fileName: file.name, status: 'pending', progress: 0, message: '' });
+          setProgress(
+            Math.round(((i + 1) / files.length) * 10),
+            `파일 업로드 중… (${i + 1} / ${files.length})`,
+            `"${file.name}" 업로드 완료`
+          );
+        } catch (e) {
+          showError(`"${file.name}" 업로드 오류: ${e.message}`);
+          uploadBtn.disabled = false;
+          return;
         }
-        const data = await res.json();
-        currentJobId = data.job_id;
-        setProgress(5, '분석 시작됨', `Job ID: ${currentJobId}`);
-        startPolling(currentJobId);
-      } catch (e) {
-        showError('업로드 오류: ' + e.message);
-        uploadBtn.disabled = false;
       }
+
+      setProgress(10, `분석 중… (0 / ${files.length} 완료)`, '');
+      startPolling();
     }
 
-    function startPolling(jobId) {
+    function startPolling() {
       if (pollTimer) clearInterval(pollTimer);
-      pollTimer = setInterval(() => pollJob(jobId), 2000);
+      pollTimer = setInterval(pollAllJobs, 2000);
     }
 
-    async function pollJob(jobId) {
+    async function pollAllJobs() {
       try {
-        const res = await fetch(`/jobs/${jobId}`);
-        if (!res.ok) throw new Error(`상태 조회 실패 (${res.status})`);
-        const data = await res.json();
+        await Promise.all(activeJobs.map(async job => {
+          if (job.status === 'done' || job.status === 'completed' || job.status === 'failed') return;
+          const res = await fetch(`/jobs/${job.jobId}`);
+          if (!res.ok) return;
+          const data = await res.json();
+          job.status = data.status;
+          job.progress = typeof data.progress === 'number' ? data.progress : 0;
+          job.message = data.message || '';
+        }));
 
-        const pct = typeof data.progress === 'number' ? Math.round(data.progress * 100) : 0;
-        setProgress(pct, statusLabel(data.status), data.message || '');
+        const doneCount = activeJobs.filter(j => j.status === 'done' || j.status === 'completed').length;
+        const failedCount = activeJobs.filter(j => j.status === 'failed').length;
+        const totalDone = doneCount + failedCount;
+        const avgProgress = activeJobs.reduce((sum, j) => sum + j.progress, 0) / activeJobs.length;
+        const pct = Math.round(10 + avgProgress * 90);
 
-        if (data.status === 'done' || data.status === 'completed') {
+        if (totalDone < activeJobs.length) {
+          setProgress(pct, `분석 중… (${totalDone} / ${activeJobs.length} 완료)`, '');
+        }
+
+        if (totalDone === activeJobs.length) {
           clearInterval(pollTimer);
-          setProgress(100, '분석 완료', data.message || '결과를 불러오는 중…');
-          await loadResults(jobId);
-          uploadBtn.disabled = false;
-        } else if (data.status === 'failed') {
-          clearInterval(pollTimer);
-          showError('분석 실패: ' + (data.message || '알 수 없는 오류'));
+          setProgress(100, '분석 완료', `${doneCount}개 성공${failedCount > 0 ? `, ${failedCount}개 실패` : ''}`);
+          await loadAllResults();
           uploadBtn.disabled = false;
         }
       } catch (e) {
-        // transient error — keep polling
         console.warn('Poll error:', e);
       }
     }
@@ -343,37 +365,55 @@
       return map[s] || s;
     }
 
-    async function loadResults(jobId) {
-      try {
-        const res = await fetch(`/jobs/${jobId}/result`);
-        if (!res.ok) throw new Error(`결과 조회 실패 (${res.status})`);
-        const data = await res.json();
-        renderResults(jobId, data.events || []);
-      } catch (e) {
-        showError('결과 로드 오류: ' + e.message);
-      }
-    }
+    async function loadAllResults() {
+      // 모든 결과를 병렬로 fetch
+      const jobResults = await Promise.all(activeJobs.map(async job => {
+        if (job.status === 'failed') return { job, data: null };
+        try {
+          const res = await fetch(`/jobs/${job.jobId}/result`);
+          if (!res.ok) throw new Error(`결과 조회 실패 (${res.status})`);
+          const data = await res.json();
+          return { job, data };
+        } catch (e) {
+          return { job, data: null, error: e.message };
+        }
+      }));
 
-    function renderResults(jobId, events) {
+      // 결과 테이블 구성
       resultsBody.innerHTML = '';
-      if (events.length === 0) {
-        const tr = document.createElement('tr');
-        tr.innerHTML = '<td colspan="7" style="color:#6b7280;text-align:center;padding:20px;">감지된 이벤트가 없습니다.</td>';
-        resultsBody.appendChild(tr);
-      } else {
-        events.forEach(ev => {
+      for (const { job, data, error } of jobResults) {
+        if (job.status === 'failed' || !data) {
+          const msg = job.status === 'failed' ? (job.message || '알 수 없는 오류') : (error || '결과를 불러오지 못했습니다.');
           const tr = document.createElement('tr');
-          tr.appendChild(td(ev.event_id ?? '—'));
-          tr.appendChild(td(ev.frame_start ?? '—'));
-          tr.appendChild(td(ev.frame_end ?? '—'));
-          tr.appendChild(td(ev.track_id ?? '—'));
-          tr.appendChild(td(ev.plate_text || '—'));
-          tr.appendChild(tdSignal(ev.turn_signal));
-          tr.appendChild(tdClip(jobId, ev));
+          tr.innerHTML = `<td colspan="6" style="color:#f87171;padding:10px 14px;">${msg}</td>`;
           resultsBody.appendChild(tr);
-        });
+          continue;
+        }
+
+        renderJobResults(job.jobId, job.fileName, data.events || [], data.recording_date);
       }
       resultsSection.style.display = 'block';
+    }
+
+    function renderJobResults(jobId, fileName, events, recordingDate) {
+      if (events.length === 0) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td colspan="6" style="color:#6b7280;text-align:center;padding:12px;">감지된 이벤트가 없습니다.</td>';
+        resultsBody.appendChild(tr);
+        return;
+      }
+      events.forEach(ev => {
+        const tr = document.createElement('tr');
+        const fnTd = document.createElement('td');
+        fnTd.innerHTML = `<span class="video-filename" title="${fileName}">${fileName}</span>`;
+        tr.appendChild(fnTd);
+        tr.appendChild(td(ev.event_id ?? '—'));
+        tr.appendChild(td(recordingDate || '—'));
+        tr.appendChild(td(ev.plate_text || '—'));
+        tr.appendChild(tdSignal(ev.turn_signal));
+        tr.appendChild(tdClip(jobId, ev));
+        resultsBody.appendChild(tr);
+      });
     }
 
     function td(text) {
@@ -422,7 +462,6 @@
         btn.textContent = '■ 닫기';
       });
       el.appendChild(btn);
-      // 다운로드 버튼
       const dlLink = document.createElement('a');
       dlLink.href = clipUrl;
       dlLink.download = ev.clip_filename;

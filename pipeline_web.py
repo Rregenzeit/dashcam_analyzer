@@ -13,7 +13,7 @@ Does NOT modify or call the existing Pipeline class — runs independently
 so the CLI workflow is untouched.
 """
 from __future__ import annotations
-import json, os, subprocess, sys, time
+import json, os, re, subprocess, sys, time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -116,6 +116,46 @@ class WebPipeline:
 
     # ------------------------------------------------------------------ #
 
+    def _extract_recording_date(
+        self, cap: cv2.VideoCapture, frame_h: int, frame_w: int
+    ) -> Optional[str]:
+        """첫 프레임 상단 중앙 오버레이에서 날짜(YYYYMMDD)를 추출. 실패 시 None 반환."""
+        if not self.plate_detector._ensure_reader():
+            return None
+        reader = self.plate_detector._reader
+
+        h_crop = max(1, int(frame_h * 0.12))
+        w_start = int(frame_w * 0.20)
+        w_end = int(frame_w * 0.80)
+
+        saved_pos = cap.get(cv2.CAP_PROP_POS_FRAMES)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        recording_date = None
+
+        for _ in range(5):
+            ret, frame = cap.read()
+            if not ret:
+                break
+            crop = frame[:h_crop, w_start:w_end]
+            crop = cv2.resize(
+                crop, (crop.shape[1] * 2, crop.shape[0] * 2),
+                interpolation=cv2.INTER_CUBIC,
+            )
+            try:
+                results = reader.readtext(crop, detail=0, paragraph=True)
+                text = " ".join(results)
+                # YYYY-MM-DD 또는 YYYY/MM/DD 형식에서 날짜만 추출
+                m = re.search(r'(\d{4})[-/](\d{2})[-/](\d{2})', text)
+                if m:
+                    recording_date = m.group(1) + m.group(2) + m.group(3)
+            except Exception as e:
+                print(f"[WebPipeline] 날짜 OCR 오류: {e}", file=sys.stderr)
+            if recording_date:
+                break
+
+        cap.set(cv2.CAP_PROP_POS_FRAMES, saved_pos)
+        return recording_date
+
     def _progress(self, frac: float, msg: str = "") -> None:
         self._progress_cb(frac, msg)
 
@@ -129,6 +169,20 @@ class WebPipeline:
         frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         buffer_frames = int(CLIP_BUFFER_SECS_WEB * fps)
+
+        self._progress(0.0, "촬영일 추출 중…")
+        recording_date = self._extract_recording_date(cap, frame_h, frame_w)
+        if recording_date:
+            print(f"[WebPipeline] 촬영일(오버레이): {recording_date}", file=sys.stderr)
+        else:
+            # 파일명에서 YYYYMMDD 추출 (예: 20260106-20h03m04s_myN.avi)
+            fname = Path(video_path).stem
+            m = re.search(r'(\d{8})', fname)
+            if m:
+                recording_date = m.group(1)
+                print(f"[WebPipeline] 촬영일(파일명 폴백): {recording_date}", file=sys.stderr)
+            else:
+                print("[WebPipeline] 촬영일 추출 실패 — 날짜 없이 진행", file=sys.stderr)
 
         ring: list[np.ndarray] = []
         frame_idx = 0
@@ -249,6 +303,7 @@ class WebPipeline:
         result = {
             "job_id": self.job_id,
             "status": "done",
+            "recording_date": recording_date,
             "events": self._events,
             "created_at": finished,
             "finished_at": finished,

@@ -17,6 +17,7 @@ class CutInEvent(BaseModel):
 class JobResult(BaseModel):
     job_id: str
     status: JobStatus
+    recording_date: Optional[str] = None
     events: list[CutInEvent] = Field(default_factory=list)
     created_at: float
     finished_at: Optional[float] = None
