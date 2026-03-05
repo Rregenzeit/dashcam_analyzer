@@ -114,6 +114,9 @@ class WebPipeline:
         # Cache of most-recent blinker state per track (updated each frame)
         self._blinker_states: dict[int, bool] = {}
 
+        # 번호판 OCR 대상: 확정된 컷인 이벤트 차량만
+        self._cutin_track_ids: set[int] = set()
+
     # ------------------------------------------------------------------ #
 
     @staticmethod
@@ -152,77 +155,102 @@ class WebPipeline:
     def _extract_recording_date(
         self, cap: cv2.VideoCapture, frame_h: int, frame_w: int
     ) -> Optional[str]:
-        """여러 ROI/프레임에서 날짜(YYYYMMDD) 추출 후 다수결 투표."""
+        """여러 ROI/프레임에서 날짜(YYYYMMDD) 추출 후 다수결 투표.
+
+        2단계 전략으로 속도 최적화:
+        - 1단계: 소수 프레임 × 상단 중앙 ROI × 2 전처리 → 3표 달성 시 즉시 종료
+        - 2단계: 더 많은 프레임 × 전체 ROI × 4 전처리 (1단계 실패 시에만)
+        """
         if not self.plate_detector._ensure_reader():
             return None
         reader = self.plate_detector._reader
 
-        # 검색할 ROI: (y_start_ratio, y_end_ratio, x_start_ratio, x_end_ratio)
-        rois = [
-            (0.00, 0.12, 0.20, 0.80),  # 상단 중앙 (기본)
-            (0.00, 0.12, 0.00, 0.50),  # 상단 좌
-            (0.00, 0.12, 0.50, 1.00),  # 상단 우
-            (0.00, 0.15, 0.00, 1.00),  # 상단 전체
-            (0.85, 1.00, 0.00, 1.00),  # 하단 전체 (일부 대시캠)
-        ]
-
-        preprocess_modes = ["raw", "gray", "thresh", "thresh_inv"]
-
         saved_pos = cap.get(cv2.CAP_PROP_POS_FRAMES)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        sample_count = min(20, max(8, total_frames // 60 if total_frames > 0 else 10))
-        step = max(1, total_frames // sample_count) if total_frames > 0 else 1
         votes: dict[str, int] = {}
 
+        # 단계별 설정
+        phases = [
+            # (sample_count, rois, modes, early_exit_votes)
+            (
+                5,
+                [(0.00, 0.12, 0.20, 0.80)],          # 상단 중앙만
+                ["raw", "thresh"],
+                3,
+            ),
+            (
+                10,
+                [
+                    (0.00, 0.12, 0.00, 0.50),
+                    (0.00, 0.12, 0.50, 1.00),
+                    (0.00, 0.15, 0.00, 1.00),
+                    (0.85, 1.00, 0.00, 1.00),
+                ],
+                ["raw", "gray", "thresh", "thresh_inv"],
+                2,
+            ),
+        ]
+
         try:
-            for i in range(sample_count):
-                if total_frames > 0:
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, min(total_frames - 1, i * step))
-                ret, frame = cap.read()
-                if not ret:
+            for phase_idx, (sample_count, rois, modes, early_exit) in enumerate(phases):
+                step = max(1, total_frames // sample_count) if total_frames > 0 else 1
+                for i in range(sample_count):
+                    if total_frames > 0:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, min(total_frames - 1, i * step))
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+
+                    for (y0r, y1r, x0r, x1r) in rois:
+                        y0 = int(frame_h * y0r)
+                        y1 = max(y0 + 1, int(frame_h * y1r))
+                        x0 = int(frame_w * x0r)
+                        x1 = max(x0 + 1, int(frame_w * x1r))
+                        crop = frame[y0:y1, x0:x1]
+                        if crop.size == 0:
+                            continue
+
+                        crop = cv2.resize(
+                            crop, (crop.shape[1] * 2, crop.shape[0] * 2),
+                            interpolation=cv2.INTER_CUBIC,
+                        )
+                        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                        thr = cv2.adaptiveThreshold(
+                            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                            cv2.THRESH_BINARY, 31, 7
+                        )
+                        variants = {
+                            "raw": crop,
+                            "gray": cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR),
+                            "thresh": cv2.cvtColor(thr, cv2.COLOR_GRAY2BGR),
+                            "thresh_inv": cv2.cvtColor(cv2.bitwise_not(thr), cv2.COLOR_GRAY2BGR),
+                        }
+
+                        for mode in modes:
+                            try:
+                                results = reader.readtext(variants[mode], detail=0, paragraph=True)
+                                text = "".join(results)
+                                for candidate in self._extract_date_candidates(text):
+                                    votes[candidate] = votes.get(candidate, 0) + 1
+                            except Exception as e:
+                                print(f"[WebPipeline] 날짜 OCR 오류({mode}): {e}", file=sys.stderr)
+
+                    # 조기 종료: 충분한 표가 모이면 즉시 반환
+                    if votes and max(votes.values()) >= early_exit:
+                        best = max(votes, key=votes.get)
+                        print(f"[WebPipeline] 날짜 조기 확정(단계{phase_idx+1}): {best} {votes}", file=sys.stderr)
+                        return best
+
+                # 1단계에서 이미 날짜가 나왔으면 2단계 진행 안 함
+                if votes:
                     break
 
-                for (y0r, y1r, x0r, x1r) in rois:
-                    y0 = int(frame_h * y0r)
-                    y1 = max(y0 + 1, int(frame_h * y1r))
-                    x0 = int(frame_w * x0r)
-                    x1 = max(x0 + 1, int(frame_w * x1r))
-                    crop = frame[y0:y1, x0:x1]
-                    if crop.size == 0:
-                        continue
-
-                    crop = cv2.resize(
-                        crop, (crop.shape[1] * 2, crop.shape[0] * 2),
-                        interpolation=cv2.INTER_CUBIC,
-                    )
-
-                    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                    thr = cv2.adaptiveThreshold(
-                        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                        cv2.THRESH_BINARY, 31, 7
-                    )
-                    thr_inv = cv2.bitwise_not(thr)
-                    variants = {
-                        "raw": crop,
-                        "gray": cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR),
-                        "thresh": cv2.cvtColor(thr, cv2.COLOR_GRAY2BGR),
-                        "thresh_inv": cv2.cvtColor(thr_inv, cv2.COLOR_GRAY2BGR),
-                    }
-
-                    for mode in preprocess_modes:
-                        try:
-                            results = reader.readtext(variants[mode], detail=0, paragraph=True)
-                            text = "".join(results)
-                            for candidate in self._extract_date_candidates(text):
-                                votes[candidate] = votes.get(candidate, 0) + 1
-                        except Exception as e:
-                            print(f"[WebPipeline] 날짜 OCR 오류({mode}): {e}", file=sys.stderr)
         finally:
             cap.set(cv2.CAP_PROP_POS_FRAMES, saved_pos)
 
         if votes:
             best = max(votes, key=votes.get)
-            print(f"[WebPipeline] 날짜 투표 결과: {votes}", file=sys.stderr)
+            print(f"[WebPipeline] 날짜 투표 결과: {best} {votes}", file=sys.stderr)
             return best
         return None
 
@@ -273,24 +301,30 @@ class WebPipeline:
                 lane_bounds = self.lane_detector.detect(frame)
                 centroids: dict[int, tuple[float, float]] = {}
 
+                det_info: list[tuple[int, int, int, int, int]] = []
                 if detections.tracker_id is not None:
                     for i, tid in enumerate(detections.tracker_id):
                         tid = int(tid)
                         x1, y1, x2, y2 = detections.xyxy[i].astype(int)
                         cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
                         centroids[tid] = (cx, cy)
+                        det_info.append((tid, x1, y1, x2, y2))
 
                         bbox = detections.xyxy[i]
                         # BlinkerDetector.update returns bool directly
                         self._blinker_states[tid] = self.blinker_detector.update(
                             frame, tid, bbox
                         )
-                        self.plate_detector.update(tid, frame, (x1, y1, x2, y2))
 
                 # -- Cut-in detection -----------------------------------
                 new_events: list[_CutInEvent] = self.cutin_detector.update(
                     frame_idx, frame_w, centroids, lane_bounds, frame_h
                 )
+
+                # -- 번호판 OCR: 확정된 컷인 이벤트 차량만 ----------------
+                for tid, x1, y1, x2, y2 in det_info:
+                    if tid in self._cutin_track_ids:
+                        self.plate_detector.update(tid, frame, (x1, y1, x2, y2))
 
                 for evt in new_events:
                     blinker_on = self._blinker_states.get(evt.track_id)
@@ -301,7 +335,6 @@ class WebPipeline:
                     else:
                         turn_signal = "unknown"
 
-                    plate = self.plate_detector.get_best(evt.track_id)
                     clip_name = f"{evt.event_id}_track{evt.track_id}.mp4"
 
                     # writer 먼저 생성 → clip_filename 결정
@@ -320,15 +353,20 @@ class WebPipeline:
                     if clip_filename and _used_fallback:
                         _reenc_paths.append(clip_path)
 
+                    # 이벤트 등록 (plate_text는 클립 버퍼 종료 후 업데이트)
+                    event_idx = len(self._events)
                     self._events.append({
                         "event_id": evt.event_id,
                         "frame_start": evt.frame_start,
                         "frame_end": evt.frame_end,
                         "track_id": evt.track_id,
-                        "plate_text": plate,
+                        "plate_text": None,
                         "turn_signal": turn_signal,
                         "clip_filename": clip_filename,
                     })
+
+                    # 이 차량 이제부터 번호판 OCR 수집 시작
+                    self._cutin_track_ids.add(evt.track_id)
 
                     if writer.isOpened():
                         # 사전 버퍼 프레임 기록
@@ -337,6 +375,8 @@ class WebPipeline:
                         active_writers[evt.event_id] = {
                             "writer": writer,
                             "frames_remaining": buffer_frames,
+                            "track_id": evt.track_id,
+                            "event_idx": event_idx,
                         }
 
                 # -- Write to active clip writers -----------------------
@@ -345,6 +385,11 @@ class WebPipeline:
                     state["frames_remaining"] -= 1
                     if state["frames_remaining"] <= 0:
                         state["writer"].release()
+                        # 클립 버퍼가 끝난 시점에 번호판 최종 확정
+                        tid = state["track_id"]
+                        plate = self.plate_detector.get_best(tid)
+                        self._events[state["event_idx"]]["plate_text"] = plate
+                        self._cutin_track_ids.discard(tid)
                         del active_writers[eid]
 
                 # -- Ring buffer ----------------------------------------

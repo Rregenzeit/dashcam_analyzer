@@ -17,11 +17,20 @@ import cv2
 import numpy as np
 
 try:
-    from config import PLATE_CROP_EXPAND, PLATE_VOTE_WINDOW, PLATE_MIN_CONFIDENCE
+    from config import (
+        PLATE_CROP_EXPAND, PLATE_VOTE_WINDOW,
+        PLATE_MIN_CONFIDENCE, PLATE_COLLECT_CONFIDENCE, PLATE_SHARPNESS_MIN,
+        PLATE_YOLO_MODEL, PLATE_YOLO_CONF, PLATE_FRAME_SKIP,
+    )
 except ImportError:
     PLATE_CROP_EXPAND = 0.15
     PLATE_VOTE_WINDOW = 30
     PLATE_MIN_CONFIDENCE = 0.30
+    PLATE_COLLECT_CONFIDENCE = 0.15
+    PLATE_SHARPNESS_MIN = 50.0
+    PLATE_YOLO_MODEL = None
+    PLATE_YOLO_CONF = 0.25
+    PLATE_FRAME_SKIP = 5
 
 try:
     import easyocr
@@ -77,6 +86,12 @@ def _normalize_plate(text: str) -> str:
 
 _PLATE_ASPECT_MIN = 2.0
 _PLATE_ASPECT_MAX = 7.0
+
+
+def _laplacian_score(img: np.ndarray) -> float:
+    """이미지 선명도를 Laplacian 분산으로 측정. 높을수록 선명."""
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
 def _detect_plate_contour(
@@ -142,6 +157,8 @@ class PlateDetector:
 
     def __init__(self, languages: list[str] | None = None) -> None:
         self._reader = None
+        self._plate_yolo = None          # YOLOv8 plate detector (lazy-loaded)
+        self._plate_yolo_failed = False  # 로드 실패 시 재시도 방지
         try:
             from config import PLATE_LANGUAGES
             default_langs = PLATE_LANGUAGES
@@ -149,6 +166,60 @@ class PlateDetector:
             default_langs = ["ko", "en"]
         self._languages = languages or default_langs
         self._history: dict[int, deque] = {}
+        self._frame_counters: dict[int, int] = {}  # 프레임 스킵 카운터
+
+    def _ensure_plate_yolo(self) -> bool:
+        """YOLOv8 번호판 검출 모델 lazy-load. GPU 사용.
+
+        로드 시도 순서:
+        1) PLATE_YOLO_MODEL 값 그대로 (로컬 경로 또는 hf:// 형식)
+        2) huggingface_hub 으로 best.pt 직접 다운로드
+        """
+        if self._plate_yolo_failed or not PLATE_YOLO_MODEL:
+            return False
+        if self._plate_yolo is not None:
+            return True
+        try:
+            from ultralytics import YOLO
+
+            self._plate_yolo = YOLO(PLATE_YOLO_MODEL)
+
+            if self._gpu_available():
+                self._plate_yolo.to("cuda")
+            print(f"[PlateDetector] YOLO plate model 로드 완료: {PLATE_YOLO_MODEL}", file=sys.stderr)
+            return True
+        except Exception as e:
+            print(f"[PlateDetector] YOLO plate model 로드 실패: {e}", file=sys.stderr)
+            self._plate_yolo_failed = True
+            return False
+
+    def _detect_plate_yolo(
+        self, frame: np.ndarray, bbox: tuple[int, int, int, int]
+    ) -> list[tuple[int, int, int, int]]:
+        """YOLOv8 plate detector로 차량 crop 내 번호판 bbox 탐지."""
+        if not self._ensure_plate_yolo():
+            return []
+        h, w = frame.shape[:2]
+        x1, y1, x2, y2 = bbox
+        exp = int(min(x2 - x1, y2 - y1) * PLATE_CROP_EXPAND)
+        ox = max(0, x1 - exp)
+        oy = max(0, y1 - exp)
+        crop = frame[oy:min(h, y2 + exp), ox:min(w, x2 + exp)]
+        if crop.size == 0:
+            return []
+        try:
+            results = self._plate_yolo(crop, verbose=False, conf=PLATE_YOLO_CONF)
+            boxes: list[tuple[int, int, int, int]] = []
+            for r in results:
+                for box in r.boxes:
+                    bx1, by1, bx2, by2 = map(int, box.xyxy[0].cpu().numpy())
+                    boxes.append((ox + bx1, oy + by1, ox + bx2, oy + by2))
+            if boxes:
+                print(f"[PlateDetector] YOLO 번호판 탐지: {len(boxes)}개 bbox={boxes}", file=sys.stderr)
+            return boxes
+        except Exception as e:
+            print(f"[PlateDetector] YOLO plate 탐지 오류: {e}", file=sys.stderr)
+            return []
 
     def _ensure_reader(self) -> bool:
         if not _EASYOCR_AVAILABLE:
@@ -184,9 +255,15 @@ class PlateDetector:
         crops: list[np.ndarray] = []
 
         py1 = max(0, y1 + int(bh * 0.55))
-        py2 = min(h, y2 + int(bh * 0.05))
-        px1 = max(0, x1 - int(bw * 0.05))
-        px2 = min(w, x2 + int(bw * 0.05))
+        py2 = min(h, y2 + int(bh * PLATE_CROP_EXPAND))
+        px1 = max(0, x1 - int(bw * PLATE_CROP_EXPAND))
+        px2 = min(w, x2 + int(bw * PLATE_CROP_EXPAND))
+
+        # 0. YOLOv8 번호판 검출 (최우선 — 전용 모델)
+        for (px1y, py1y, px2y, py2y) in self._detect_plate_yolo(frame, bbox):
+            crop = frame[max(0, py1y):min(h, py2y), max(0, px1y):min(w, px2y)]
+            if crop.size > 0:
+                crops.append(crop)
 
         # 1. 컨투어 기반 번호판 후보 (1순위)
         if py2 > py1 and px2 > px1:
@@ -242,9 +319,23 @@ class PlateDetector:
         bbox_xyxy: tuple[int, int, int, int],
     ) -> None:
         """Add one frame's OCR candidate for a vehicle."""
+        # 프레임 스킵: N프레임마다 1번만 OCR 실행
+        cnt = self._frame_counters.get(track_id, 0)
+        self._frame_counters[track_id] = cnt + 1
+        if cnt % PLATE_FRAME_SKIP != 0:
+            return
+
         if not self._ensure_reader():
             return
         crops = self._plate_roi_crops(frame, bbox_xyxy)
+        if not crops:
+            return
+
+        # 선명도 검사: 대표 크롭(하단 전체 ROI = 첫 번째 컨투어 이후)이 너무 흐리면 스킵
+        # crops[0]이 컨투어 결과일 수 있으므로 전체 중 최대 선명도로 판단
+        if max(_laplacian_score(c) for c in crops[:3]) < PLATE_SHARPNESS_MIN:
+            return
+
         hist = self._history.setdefault(track_id, deque(maxlen=PLATE_VOTE_WINDOW))
         for crop in crops:
             for variant in self._ocr_variants(crop):
@@ -253,10 +344,11 @@ class PlateDetector:
                 except Exception:
                     continue
                 for (_bbox, text, conf) in results:
-                    if conf < PLATE_MIN_CONFIDENCE:
+                    if conf < PLATE_COLLECT_CONFIDENCE:  # 수집 단계 — 낮은 임계값
                         continue
                     cleaned = _normalize_plate(text)
                     if cleaned:
+                        print(f"[PlateDetector] 번호판 후보: track={track_id} raw={text!r} → {cleaned} (conf={conf:.2f})", file=sys.stderr)
                         hist.append(cleaned)
 
     def get_best(self, track_id: int) -> Optional[str]:
@@ -277,7 +369,11 @@ class PlateDetector:
 
     def reset_track(self, track_id: int) -> None:
         self._history.pop(track_id, None)
+        self._frame_counters.pop(track_id, None)
 
     def reset(self) -> None:
         self._history.clear()
+        self._frame_counters.clear()
         self._reader = None
+        self._plate_yolo = None
+        self._plate_yolo_failed = False

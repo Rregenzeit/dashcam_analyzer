@@ -183,6 +183,13 @@ class CutInDetector:
 
         return events
 
+    def candidate_track_ids(self) -> set[int]:
+        """현재 끼어들기 후보(ENTERING / INSIDE_EGO) 차량의 track_id 집합 반환."""
+        return {
+            tid for tid, t in self._tracks.items()
+            if t.state in (_VehicleState.ENTERING, _VehicleState.INSIDE_EGO)
+        }
+
     def reset(self) -> None:
         self._tracks.clear()
         self._event_counter = 0

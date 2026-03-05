@@ -78,8 +78,17 @@ CUTIN_FRONT_ZONE_RATIO = 0.70     # only track vehicles in the lower fraction of
 # ── Plate Recognition ────────────────────────────────────────────────────────
 PLATE_CROP_EXPAND = 0.15          # fraction to expand vehicle bbox for plate search
 PLATE_VOTE_WINDOW = 30            # frames for majority-vote text stabilization
-PLATE_MIN_CONFIDENCE = 0.30       # EasyOCR minimum confidence threshold
+PLATE_MIN_CONFIDENCE = 0.30       # EasyOCR minimum confidence threshold (최종 판단용)
+PLATE_COLLECT_CONFIDENCE = 0.15   # EasyOCR minimum confidence for accumulation (수집용 — 낮게 유지)
+PLATE_SHARPNESS_MIN = 50.0        # Laplacian variance minimum — blurry frames are skipped
 PLATE_LANGUAGES = ["ko", "en"]    # OCR languages: Korean + English
+# YOLO 번호판 검출 모델 경로 (None = 비활성화, 기본값)
+# 로컬 .pt 파일 경로를 지정하면 활성화됨
+# 예: PLATE_YOLO_MODEL = "C:/models/plate_yolov8n.pt"
+# 공개 모델 참고: https://universe.roboflow.com 에서 license plate detection 모델 다운로드
+PLATE_YOLO_MODEL = r"C:/Users/didgh/.cache/plate_detector/best.pt"
+PLATE_YOLO_CONF = 0.25            # YOLO plate detector confidence threshold
+PLATE_FRAME_SKIP = 5              # OCR를 N프레임마다 1번만 실행 (속도 개선)
 
 # ── Web API ──────────────────────────────────────────────────────────────────
 API_HOST = "0.0.0.0"
